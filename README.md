@@ -171,11 +171,11 @@
 
 ## > 效果展示
 <div align=center>  <img src="https://s2.loli.net/2024/09/30/15STOnguXb2vINA.png" height="300" width="300">  </div>
-<center><strong>双层烟花</strong></center>
+<p align="center"><b>双层烟花</b></p>
 <div align=center>  <img src="https://s2.loli.net/2024/09/30/jOSAcTvmf4d7PCg.png" height="300" width="300">  </div>
-<center><strong>双层渐变烟花</strong></center>
+<p align="center"><b>双层渐变烟花</b></p>
 <div align=center>  <img src="https://s2.loli.net/2024/09/30/JuYBx7DfncHASQj.png" height="300" width="300">  </div>  
-<center><strong>单层渐变烟花</strong></center>
+<p align="center"><b>单层渐变烟花</b></p>
 
 ## > 作者&技术交流/反馈群
 - bilibili：[TianKong_y](https://space.bilibili.com/288309681)
