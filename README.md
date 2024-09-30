@@ -18,6 +18,7 @@
 
 ## > 简介
 *DynFirework*是使用Python编写的*Minecraft*粒子烟花生成器**代码模板**，提供了若干模板函数以便生成一定样式的烟花数据包文件(.mcfunction)。
+**[介绍视频](https://www.bilibili.com/video/BV1xYxxeqEMf/)**
 ## > 前置Mod及版本兼容性
 *DynFirework*的输出指令基于[Colorblock](https://www.bilibili.com/read/cv32079719/)的rgbatickparameter和normal子指令，以实现渐变颜色粒子。
 由于*Colorblock*仅支持1.12.2和1.16.5版本，当前版本的*DynFirework v1.0*生成的指令也只在上述2个版本有效。
