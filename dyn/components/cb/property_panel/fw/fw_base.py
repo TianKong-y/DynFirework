@@ -191,6 +191,8 @@ class FwBase(FormBase):
 		self._btn_pos_select.setVisible(not read_only_pos)
 		if read_only_pos:
 			self._group_pos.setTitle("爆炸中心（由轨迹终点决定）")
+		else:
+			self._group_pos.setTitle("爆炸中心")
 
 		self._chk_inner_gradient.setChecked(e.inner_color.use_gradient)
 		self._color_inner_end.setEnabled(e.inner_color.use_gradient)

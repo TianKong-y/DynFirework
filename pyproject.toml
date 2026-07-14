@@ -22,7 +22,7 @@ dynfirework-cli = "dyn.cli:main"
 include = ["dyn", "dyn.*"]
 
 [tool.setuptools.package-data]
-dyn = ["help/**/*.md", "ui/*.ui", "ui/**/*.ui", "ui/theme/*.qss"]
+dyn = ["help/**/*.md", "resources/**/*"]
 
 [build-system]
 requires = ["setuptools>=64"]

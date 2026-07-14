@@ -52,14 +52,17 @@ class ProjectManager(QObject):
 		self.project_modified.emit()
 
 	def new_project(self, name: str = "Untitled", backend: str = "df",
-	                mc_version: str = "1.21.8", bpm: float = 120.0) -> Project:
-		log.debug(f"创建新项目: name={name}, backend={backend}, mc={mc_version}, bpm={bpm}")
+	                mc_version: str = "1.21.8", bpm: float = 120.0,
+	                time_signature: tuple = (4, 4), audio_offset_ms: int = 0) -> Project:
+		log.debug(f"创建新项目: name={name}, backend={backend}, mc={mc_version}, bpm={bpm}, ts={time_signature}, offset={audio_offset_ms}ms")
 		self._cleanup_music_temp()
 		self._project = Project(
 			backend=Backend(backend),
 			name=name,
 			mc_version=mc_version,
 			bpm=bpm,
+			time_signature=time_signature,
+			audio_offset_ms=float(audio_offset_ms),
 		)
 		self._file_path = ""
 		self._is_modified = False

@@ -10,13 +10,13 @@ log = get_logger(__name__)
 
 from PySide6 import QtWidgets
 from PySide6.QtCore import Signal, QItemSelectionModel
-from PySide6.QtGui import QKeySequence, QAction, QColor, QUndoStack
+from PySide6.QtGui import QKeySequence, QColor, QUndoStack
 from PySide6.QtWidgets import (
 	QApplication, QMainWindow, QGridLayout, QAbstractItemView, QFileDialog,
 	QMessageBox,
 )
 
-from dyn.ui.pos_select.pos_select_graph_ui import Ui_MainWindow as PosSelectMainUI
+from dyn.ui.components.pos_selector.pos_selector import Ui_MainWindow as PosSelectMainUI
 from dyn.lib.units import MinecraftPosition
 from dyn.components.pos_select.grid_select import (
 	_BaseGraphWidget, PixGraphWidget, PixElementList,
@@ -97,44 +97,13 @@ class PosSelectMainWindow(QMainWindow):
 		return self._fastsearch
 
 	def _setup_menus(self) -> None:
-		mb = self.menuBar()
-
-		view_menu = None
-		for child in mb.findChildren(QtWidgets.QMenu):
-			if child.title() == "视图":
-				view_menu = child
-				break
-		if view_menu is None:
-			view_menu = mb.addMenu("视图")
-
-		self._act_grid_mode = QAction("网格图模式", self)
-		self._act_grid_mode.setCheckable(True)
-		self._act_grid_mode.setChecked(True)
-		self._act_grid_mode.triggered.connect(lambda: self.switch_mode("grid"))
-		view_menu.addAction(self._act_grid_mode)
-
-		self._act_radar_mode = QAction("雷达图模式", self)
-		self._act_radar_mode.setCheckable(True)
-		self._act_radar_mode.triggered.connect(lambda: self.switch_mode("radar"))
-		view_menu.addAction(self._act_radar_mode)
-
-		edit_menu = None
-		for child in mb.findChildren(QtWidgets.QMenu):
-			if child.title() == "编辑":
-				edit_menu = child
-				break
-		if edit_menu is None:
-			edit_menu = mb.addMenu("编辑")
-
-		act_undo = QAction("撤销(&U)", self)
-		act_undo.setShortcut(QKeySequence.Undo)
-		act_undo.triggered.connect(self._on_undo)
-		edit_menu.addAction(act_undo)
-
-		act_redo = QAction("重做(&R)", self)
-		act_redo.setShortcut(QKeySequence("Ctrl+Shift+Z"))
-		act_redo.triggered.connect(self._on_redo)
-		edit_menu.addAction(act_redo)
+		ui = self.ui
+		ui.grid_select_toggle.triggered.connect(lambda: self.switch_mode("grid"))
+		ui.radar_graph_toggle.triggered.connect(lambda: self.switch_mode("radar"))
+		ui.undo_action.setShortcut(QKeySequence.Undo)
+		ui.undo_action.triggered.connect(self._on_undo)
+		ui.redo_action.setShortcut(QKeySequence("Ctrl+Shift+Z"))
+		ui.redo_action.triggered.connect(self._on_redo)
 
 	def switch_mode(self, mode: str) -> None:
 		log.debug(f"switch_mode {mode}")
@@ -154,14 +123,14 @@ class PosSelectMainWindow(QMainWindow):
 			self.radar_graph.hide()
 			self.pix_graph.show()
 			self._active_graph = self.pix_graph
-			self._act_grid_mode.setChecked(True)
-			self._act_radar_mode.setChecked(False)
+			self.ui.grid_select_toggle.setChecked(True)
+			self.ui.radar_graph_toggle.setChecked(False)
 		else:
 			self.pix_graph.hide()
 			self.radar_graph.show()
 			self._active_graph = self.radar_graph
-			self._act_grid_mode.setChecked(False)
-			self._act_radar_mode.setChecked(True)
+			self.ui.grid_select_toggle.setChecked(False)
+			self.ui.radar_graph_toggle.setChecked(True)
 
 		# 重连新 graph 信号
 		self._connect_graph(self._active_graph)
@@ -203,17 +172,19 @@ class PosSelectMainWindow(QMainWindow):
 		graph.selection_changed.connect(self.get_chosen_point)
 
 	def connect_menu_toggles(self):
-		self.ui.action_exit.triggered.connect(self.close)
+		self.ui.exit_action.triggered.connect(self.close)
 		self.ui.buttonBox.rejected.connect(self.close)
 		self.ui.buttonBox.accepted.connect(self.confirm_selection)
-		self.ui.action_pixsize_min.triggered.connect(self._on_min_size)
-		self.ui.action_pixsize_max.triggered.connect(self._on_max_size)
-		self.ui.action_pixsize_proper.triggered.connect(self._on_proper_size)
-		self.ui.pushButton_delpoint.clicked.connect(self._on_del_button)
-		self.ui.pushButton_editpoint.clicked.connect(self._on_edit_button)
-		# 导入/导出菜单
-		self.ui.action_import.triggered.connect(self.import_data)
-		self.ui.action_export.triggered.connect(self.export_data)
+		self.ui.min_size_action.triggered.connect(self._on_min_size)
+		self.ui.max_size_action.triggered.connect(self._on_max_size)
+		self.ui.proper_size_action.triggered.connect(self._on_proper_size)
+		self.ui.delete_point_button.clicked.connect(self._on_del_button)
+		self.ui.edit_point_button.clicked.connect(self._on_edit_button)
+		self.ui.delete_action.triggered.connect(self._on_del_button)
+		self.ui.import_action.triggered.connect(self.import_data)
+		self.ui.export_action.triggered.connect(self.export_data)
+		self._shared_undo_stack.canUndoChanged.connect(self.ui.undo_action.setEnabled)
+		self._shared_undo_stack.canRedoChanged.connect(self.ui.redo_action.setEnabled)
 
 	def _on_del_button(self) -> None:
 		if self._active_graph is not None and self._active_graph.selected_point is not None:
@@ -246,7 +217,7 @@ class PosSelectMainWindow(QMainWindow):
 	def selection_text_change(self):
 		pt = self.chosen_point
 		if pt:
-			self.ui.label_selection.setText(f"已选中 ({pt.x}, {pt.y}, {pt.z})")
+			self.ui.selected_point_text.setText(f"({pt.x}, {pt.y}, {pt.z})")
 
 	def selection_point_border_change(self):
 		if self._active_graph and self.chosen_point:
@@ -261,6 +232,11 @@ class PosSelectMainWindow(QMainWindow):
 		self.selection_text_change()
 		self.selection_point_border_change()
 		self.update_list_selection()
+		has_selection = self.chosen_point is not None
+		self.ui.edit_point_button.setEnabled(has_selection)
+		self.ui.delete_point_button.setEnabled(has_selection)
+		self.ui.delete_action.setEnabled(has_selection)
+		self.ui.move_center_action.setEnabled(has_selection)
 
 	def update_list_selection(self):
 		if self.chosen_point not in self._points:

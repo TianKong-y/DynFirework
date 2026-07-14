@@ -34,6 +34,7 @@ class DFTimelineWidget(QWidget):
 	element_resized = Signal(str, float, float)
 	playback_cursor_changed = Signal(float)
 	view_changed = Signal()
+	delete_requested = Signal()
 
 	def __init__(self, parent=None) -> None:
 		super().__init__(parent)
@@ -361,7 +362,7 @@ class DFTimelineWidget(QWidget):
 	def keyPressEvent(self, event: QKeyEvent) -> None:
 		if event.key() == Qt.Key_Delete and self._selected_id and self._controller:
 			log.debug(f"时间线按键删除: id={self._selected_id}")
-			self._controller.remove_element(self._selected_id)
+			self.delete_requested.emit()
 		super().keyPressEvent(event)
 
 	def on_elements_changed(self, *args) -> None:

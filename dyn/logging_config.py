@@ -8,35 +8,14 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 from pathlib import Path
 
-# 环境变量名
-ENV_LOG_LEVEL = "DYN_LOG_LEVEL"
-ENV_LOG_FILE = "DYN_LOG_FILE"
-
-_LEVEL_MAP: dict[str, int] = {
-	"debug": logging.DEBUG,
-	"info": logging.INFO,
-	"warning": logging.WARNING,
-	"warn": logging.WARNING,
-	"error": logging.ERROR,
-	"critical": logging.CRITICAL,
-}
-
-def _resolve_console_level() -> int:
-	"""从环境变量解析控制台日志级别，默认 INFO."""
-	raw = os.environ.get(ENV_LOG_LEVEL, "").strip().lower()
-	if raw in _LEVEL_MAP:
-		return _LEVEL_MAP[raw]
-	if raw:
-		print(f"Skipping env DYN_LOG_LEVEL='{raw}'", file=sys.stderr)
-	return logging.INFO
+import dyn.env as _env
 
 def _resolve_log_file() -> Path:
 	"""从环境变量或默认路径获取日志文件路径."""
-	raw = os.environ.get(ENV_LOG_FILE, "").strip()
+	raw = _env.get_str(_env.ENV_LOG_FILE)
 	if raw:
 		return Path(raw)
 	return Path(__file__).parent.parent / "logs" / "dynfirework.log"
@@ -56,7 +35,7 @@ def setup_logging(level: int = logging.DEBUG) -> None:
 		datefmt="%Y-%m-%d %H:%M:%S",
 	)
 
-	console_level = _resolve_console_level()
+	console_level = _env.resolve_console_level()
 	console = logging.StreamHandler(sys.stderr)
 	console.setLevel(console_level)
 	console.setFormatter(fmt)
@@ -70,6 +49,7 @@ def setup_logging(level: int = logging.DEBUG) -> None:
 		file_handler.setFormatter(fmt)
 		root.addHandler(file_handler)
 	except Exception:
+		print("Failed to setup logging file.")
 		pass
 
 def get_logger(name: str) -> logging.Logger:

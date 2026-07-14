@@ -17,3 +17,5 @@ logs/
 
 arch/*
 !arch/dynfirework.desktop
+
+*.ui

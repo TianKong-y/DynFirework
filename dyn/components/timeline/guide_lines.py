@@ -73,13 +73,16 @@ class GuideLineRenderer:
 	                     widget_width: int, *,
 	                     bpm: float, audio_offset_ms: float,
 	                     time_signature: tuple, show: bool) -> None:
-		"""绘制BPM节拍线."""
+		"""绘制BPM节拍线 缩放过小时自动隐藏次节拍只保留主节拍."""
 		if not show or bpm <= 0:
 			return
 		beat_interval = (60.0 / bpm) * self._nps
 		beats_per_measure = time_signature[0]
 		measure_interval = beat_interval * beats_per_measure
 		offset = (audio_offset_ms / 1000.0) * self._nps
+
+		px = self._px_per_native()
+		show_minor = beat_interval * px >= 10.0
 
 		start = max(0.0, self._from_x(float(self._label_width)) - measure_interval)
 		end = self._from_x(float(widget_width)) + measure_interval
@@ -94,7 +97,8 @@ class GuideLineRenderer:
 				if self._label_width <= x <= widget_width:
 					if beat % beats_per_measure == 0:
 						p.setPen(QPen(self._beat_major, 3))
-					else:
+						p.drawLine(x, int(y_top), x, int(y_bot))
+					elif show_minor:
 						p.setPen(QPen(self._beat_minor, 1))
-					p.drawLine(x, int(y_top), x, int(y_bot))
+						p.drawLine(x, int(y_top), x, int(y_bot))
 			beat += 1

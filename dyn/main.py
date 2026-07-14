@@ -6,24 +6,26 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from dyn.env import RESOURCE_DIR, get_flag
 from dyn.logging_config import setup_logging, get_logger
 
 log = get_logger(__name__)
 
 from PySide6.QtCore import QItemSelectionModel, Qt, Slot, QSettings
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtGui import QColor, QFont, QFontDatabase
+from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (
-	QApplication, QMainWindow, QWidget, QVBoxLayout, QSplitter, QTreeView, QFrame, QFileDialog, QMessageBox,
-	QMenu, QLabel, QDialog, QScrollArea,
+	QApplication, QMainWindow, QTreeView, QFileDialog, QMessageBox,
+	QMenu, QLabel, QDialog,
 )
 
 from dyn.lib.units import MinecraftPosition
 from dyn.models.project import Backend
 from dyn.models import Project
 
-from dyn.models.df.base import ElementCategory
+from dyn.models.df.base import Element as DfElement, ElementCategory
 from dyn.models.df.composites import CompositeElement
-from dyn.models.cb.base import ElementType as CbElementType
+from dyn.models.cb.base import Element as CbElement, ElementType as CbElementType
 from dyn.models.cb.composites import TrajFireworkElement as CbTrajFireworkElement
 
 from dyn.service.audio_service import load_waveform
@@ -31,6 +33,7 @@ from dyn.service.element_controller import (
 	ElementController, DF_CATEGORY_DISPLAY, CB_CATEGORY_DISPLAY,
 )
 from dyn.service.export_service import ExportService
+from dyn.service.metronome import Metronome
 from dyn.service.playback_controller import PlaybackController
 from dyn.service.project_manager import ProjectManager
 from dyn.service.undo_manager import UndoManager
@@ -49,9 +52,9 @@ from dyn.components.pos_select.select_center import PosSelectMainWindow
 
 from dyn.actions.about import DYNAboutWindow
 from dyn.actions.help import DYNHelpWindow
-from dyn.ui.dialogs.export_dialog import ExportDialog
-from dyn.ui.dialogs.project_creation_dialog import ProjectCreationDialog
-from dyn.ui.dialogs.project_settings_dialog import ProjectSettingsDialog
+from dyn.actions.new_project import NewProjectDialog
+from dyn.actions.project_settings import ProjectSettingsDialog
+from dyn.actions.export_datapack import ExportDatapackDialog
 
 _DF_CATEGORY_ICONS: dict[ElementCategory, str] = {
 	ElementCategory.FIREWORK: "*",
@@ -70,11 +73,11 @@ def _elem_info(elem) -> str:
 	"""返回元素的关键信息字符串，兼容 cb/df."""
 	if elem is None:
 		return "None"
-	if hasattr(elem, 'category'):
+	if isinstance(elem, DfElement):
 		return f"{elem.name} cat={elem.category.value} t={elem.start_time:.2f}s dur={elem.duration:.2f}s"
-	elif hasattr(elem, 'start_tick'):
+	elif isinstance(elem, CbElement):
 		info = f"{elem.name} type={elem.element_type.name} t={elem.start_tick}t"
-		if hasattr(elem, 'traj_duration_ticks') and hasattr(elem, 'fw_duration_ticks'):
+		if isinstance(elem, CbTrajFireworkElement):
 			info += f" traj={elem.traj_duration_ticks}t fw={elem.fw_duration_ticks}t"
 		else:
 			info += f" dur={elem.duration_ticks}t"
@@ -94,17 +97,23 @@ class MainWin(QMainWindow):
 		self._backend: Backend | None = None
 		self._controller: ElementController | None = None
 
+		# 测试模式
+		self._test_mode = get_flag("DYN_TEST_ENABLED")
+
 		# 共享服务
 		self._project_manager = ProjectManager(self)
 		self._export_service = ExportService(self)
 		self._playback = PlaybackController(self)
+		self._metronome = Metronome(self) if self._test_mode else None
 		self._pos_selector = PosSelectMainWindow()
 
 		# 共享 UI
 		self._inspector = Inspector()
-		self._transport_bar = TransportBar(self._playback)
+		self._transport_bar = None  # 在 _inject_components() 中创建
+		self._help_window = DYNHelpWindow()
 
 		# 后端特定 UI (在 _activate_backend 中创建)
+		self._ui: Any = None
 		self._timeline: Any = None
 		self._property_panel: Any = None
 		self._element_browser_model: Any = None
@@ -114,25 +123,30 @@ class MainWin(QMainWindow):
 		self._pending_position_target: str = ""
 
 		# 构建初始 UI
-		self._setup_statusbar()
-		self._setup_shortcuts()
 		self._connect_shared_signals()
 		self._restore_window_state()
 
 		# 激活默认后端
 		self._activate_backend(Backend.DF)
+		proj = self._project_manager.project
+		self._ui.label.setText(f"{proj.name} - {proj.mc_version}")
 
 	# Backend Switching
 
 	def _activate_backend(self, backend: Backend) -> None:
 		"""根据后端初始化/切换整个 UI 组件树."""
 		if self._backend == backend and self._controller is not None:
-			log.debug("_activate_backend: 已激活,跳过")
 			return
-		log.debug(f"激活后端: {backend.value}")
-
-		self._deactivate_current_backend()
+		if self._backend is not None:
+			self._deactivate_current_backend()
 		self._backend = backend
+
+		if backend == Backend.CB:
+			from dyn.ui.mainwin_cb import Ui_MainWindow as MWUI
+		else:
+			from dyn.ui.mainwin_df import Ui_MainWindow as MWUI
+		self._ui = MWUI()
+		self._ui.setupUi(self)
 
 		self._controller = ElementController(backend=backend, parent=self)
 		self._undo_manager = UndoManager(self._controller, self)
@@ -142,46 +156,61 @@ class MainWin(QMainWindow):
 		else:
 			self._init_df_ui()
 
-		self._setup_layout()
-		self._rebuild_menu()
+		self._inject_components()
+		self._connect_menu_actions()
 		self._connect_backend_signals()
 		self._undo_manager.clear()
 		self._inspector.clear()
 
 	def _deactivate_current_backend(self) -> None:
 		"""清理当前后端的所有信号和组件."""
-		log.debug(f"停用当前后端: {self._backend}")
 		if self._controller:
 			try:
 				self._controller.element_added.disconnect()
 				self._controller.element_removed.disconnect()
 				self._controller.element_changed.disconnect()
 				self._controller.selection_changed.disconnect()
-			except (RuntimeError, TypeError) as e:
-				log.warning(f"信号断开失败: {e}")
+			except (RuntimeError, TypeError):
+				pass
+		for slot in (self._on_playback_position_cb, self._on_playback_position_df):
+			try:
+				self._playback.position_changed.disconnect(slot)
+			except (RuntimeError, TypeError):
+				pass
 		try:
-			self._playback.position_changed.disconnect()
-			self._playback.state_changed.disconnect()
-		except (RuntimeError, TypeError) as e:
-			log.warning(f"信号断开失败: {e}")
+			self._playback.state_changed.disconnect(self._on_playback_state_for_actions)
+		except (RuntimeError, TypeError):
+			pass
+		if self._metronome is not None:
+			try:
+				self._playback.position_changed.disconnect(self._metronome.on_tick)
+				self._playback.state_changed.disconnect(self._on_metronome_state_changed)
+			except (RuntimeError, TypeError):
+				pass
 		if self._timeline:
 			try:
 				self._timeline.playback_cursor_changed.disconnect()
-			except (RuntimeError, TypeError) as e:
-				log.warning(f"信号断开失败: {e}")
-		try:
-			self._transport_bar.beat_lines_toggled.disconnect()
-		except (RuntimeError, TypeError):
-			pass
-		try:
-			self._transport_bar.time_marks_toggled.disconnect()
-		except (RuntimeError, TypeError):
-			pass
-		self.setCentralWidget(None)
+			except (RuntimeError, TypeError):
+				pass
+		if self._transport_bar:
+			try:
+				self._transport_bar.beat_lines_toggled.disconnect()
+			except (RuntimeError, TypeError):
+				pass
+			try:
+				self._transport_bar.time_marks_toggled.disconnect()
+			except (RuntimeError, TypeError):
+				pass
+			try:
+				self._transport_bar.metronome_toggled.disconnect()
+			except (RuntimeError, TypeError):
+				pass
 		self._timeline = None
 		self._property_panel = None
 		self._element_browser_model = None
 		self._tree_view = None
+		self._transport_bar = None
+		self._ui = None
 
 	def _init_cb_ui(self) -> None:
 		"""初始化 ColorBlock 后端 UI 组件."""
@@ -211,186 +240,17 @@ class MainWin(QMainWindow):
 		self._property_panel = PropertyPanel(self._controller)
 		log.debug("DF 属性面板已创建")
 
-	# Menu
+	# Component Injection
 
-	def _rebuild_menu(self) -> None:
-		mb = self.menuBar()
-		mb.clear()
-		self._setup_menu()
+	def _inject_components(self) -> None:
+		"""将代码创建的组件注入到 Designer 预设的占位控件中."""
+		ui = self._ui
 
-	def _setup_menu(self) -> None:
-		mb = self.menuBar()
-
-		# 文件
-		file_menu = mb.addMenu("文件(&F)")
-
-		act = QAction("新建项目(&N)", self)
-		act.setShortcut(QKeySequence.New)
-		act.triggered.connect(self._on_new_project)
-		file_menu.addAction(act)
-
-		act = QAction("打开项目(&O)", self)
-		act.setShortcut(QKeySequence.Open)
-		act.triggered.connect(self._on_open_project)
-		file_menu.addAction(act)
-
-		file_menu.addSeparator()
-
-		act = QAction("保存(&S)", self)
-		act.setShortcut(QKeySequence.Save)
-		act.triggered.connect(self._on_save_project)
-		file_menu.addAction(act)
-
-		act = QAction("另存为...", self)
-		act.setShortcut(QKeySequence.SaveAs)
-		act.triggered.connect(self._on_save_as_project)
-		file_menu.addAction(act)
-
-		file_menu.addSeparator()
-
-		act = QAction("导入音乐...", self)
-		act.triggered.connect(self._on_import_music)
-		file_menu.addAction(act)
-
-		file_menu.addSeparator()
-
-		act = QAction("导出数据包...", self)
-		act.setShortcut(QKeySequence("Ctrl+E"))
-		act.triggered.connect(self._on_export_datapack)
-		file_menu.addAction(act)
-
-		file_menu.addSeparator()
-
-		act = QAction("退出(&Q)", self)
-		act.setShortcut(QKeySequence.Quit)
-		act.triggered.connect(self.close)
-		file_menu.addAction(act)
-
-		# 编辑
-		edit_menu = mb.addMenu("编辑(&E)")
-
-		new_menu = edit_menu.addMenu("新建元素")
-		if self._backend == Backend.CB:
-			cats = list(CbElementType)
-			icons = _CB_CATEGORY_ICONS
-			display = CB_CATEGORY_DISPLAY
-		else:
-			cats = list(ElementCategory)
-			icons = _DF_CATEGORY_ICONS
-			display = DF_CATEGORY_DISPLAY
-		for cat in cats:
-			icon = icons.get(cat, "")
-			label = display.get(cat, cat.value)
-			act = QAction(f"{icon} 新建{label}", self)
-			act.triggered.connect(lambda checked, c=cat: self._on_new_element(c))
-			new_menu.addAction(act)
-
-		edit_menu.addSeparator()
-
-		undo_act = QAction("撤销(&U)", self)
-		undo_act.setShortcut(QKeySequence.Undo)
-		undo_act.triggered.connect(self._undo_manager.undo)
-		self._undo_manager.can_undo_changed.connect(undo_act.setEnabled)
-		self._undo_manager.undo_text_changed.connect(
-			lambda t, a=undo_act: a.setText(f"撤销 {t}" if t else "撤销(&U)")
-		)
-		edit_menu.addAction(undo_act)
-
-		redo_act = QAction("重做(&R)", self)
-		redo_act.setShortcut(QKeySequence("Ctrl+Shift+Z"))
-		redo_act.triggered.connect(self._undo_manager.redo)
-		self._undo_manager.can_redo_changed.connect(redo_act.setEnabled)
-		self._undo_manager.redo_text_changed.connect(
-			lambda t, a=redo_act: a.setText(f"重做 {t}" if t else "重做(&R)")
-		)
-		edit_menu.addAction(redo_act)
-
-		edit_menu.addSeparator()
-
-		act = QAction("复制元素(&C)", self)
-		act.setShortcut(QKeySequence.Copy)
-		act.triggered.connect(self._on_clone_element)
-		edit_menu.addAction(act)
-
-		act = QAction("删除元素(&D)", self)
-		act.setShortcut(QKeySequence.Delete)
-		act.triggered.connect(self._on_delete_selected)
-		edit_menu.addAction(act)
-
-		# 视图
-		view_menu = mb.addMenu("视图(&V)")
-
-		act = QAction("位置选择器(&P)", self)
-		act.triggered.connect(self._pos_selector.showNormal)
-		view_menu.addAction(act)
-
-		view_menu.addSeparator()
-
-		act_vl = QAction("元素列表", self)
-		act_vl.setCheckable(True)
-		act_vl.setChecked(True)
-		act_vl.toggled.connect(self._left_panel.setVisible)
-		view_menu.addAction(act_vl)
-
-		act_vp = QAction("属性面板", self)
-		act_vp.setCheckable(True)
-		act_vp.setChecked(True)
-		act_vp.toggled.connect(self._property_panel.setVisible)
-		view_menu.addAction(act_vp)
-
-		act_vi = QAction("检查器", self)
-		act_vi.setCheckable(True)
-		act_vi.setChecked(True)
-		act_vi.toggled.connect(self._right_panel.setVisible)
-		view_menu.addAction(act_vi)
-
-		act_vt = QAction("时间线", self)
-		act_vt.setCheckable(True)
-		act_vt.setChecked(True)
-		act_vt.toggled.connect(self._bottom_panel.setVisible)
-		view_menu.addAction(act_vt)
-
-		# 项目
-		proj_menu = mb.addMenu("项目(&P)")
-
-		act = QAction("项目设置...", self)
-		act.triggered.connect(self._on_project_settings)
-		proj_menu.addAction(act)
-
-		# 帮助
-		help_menu = mb.addMenu("关于(&H)")
-
-		act = QAction("关于 DynFirework(&A)", self)
-		act.triggered.connect(lambda: DYNAboutWindow().exec())
-		help_menu.addAction(act)
-
-		act = QAction("帮助(&H)", self)
-		act.setShortcut(QKeySequence(Qt.Key_F1))
-		act.triggered.connect(lambda: DYNHelpWindow().exec())
-		help_menu.addAction(act)
-
-	# Layout
-
-	def _setup_layout(self) -> None:
-		log.debug("重建窗口布局")
-		central = QWidget()
-		self.setCentralWidget(central)
-		root_layout = QVBoxLayout(central)
-		root_layout.setContentsMargins(0, 0, 0, 0)
-		root_layout.setSpacing(0)
-
-		main_splitter = QSplitter(Qt.Vertical)
-		root_layout.addWidget(main_splitter, stretch=1)
-
-		top_splitter = QSplitter(Qt.Horizontal)
-
-		# 左: 元素列表
-		self._left_panel = QFrame()
-		left_layout = QVBoxLayout(self._left_panel)
-		left_layout.setContentsMargins(4, 4, 4, 4)
-		left_layout.addWidget(QLabel("元素列表"))
-
-		self._tree_view = QTreeView()
+		# 元素列表
+		self._tree_view = ui.element_list_tree_view
+		f = QFont()
+		f.setFamilies(["Ark Pixel 12px P zh_cn"])
+		self._tree_view.setFont(f)
 		self._tree_view.setModel(self._element_browser_model)
 		self._tree_view.setHeaderHidden(False)
 		self._tree_view.setAnimated(True)
@@ -398,52 +258,170 @@ class MainWin(QMainWindow):
 		self._tree_view.expandAll()
 		self._tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
 		self._tree_view.customContextMenuRequested.connect(self._on_tree_context_menu)
-		left_layout.addWidget(self._tree_view)
-		top_splitter.addWidget(self._left_panel)
 
-		# 中: 属性面板
-		top_splitter.addWidget(self._property_panel)
+		# 属性面板 - 设入 QScrollArea
+		ui.property_panel_area.setWidget(self._property_panel)
 
-		# 右: 检查器
-		self._right_panel = QFrame()
-		right_layout = QVBoxLayout(self._right_panel)
-		right_layout.setContentsMargins(4, 4, 4, 4)
-		right_layout.addWidget(self._inspector)
-		top_splitter.addWidget(self._right_panel)
-		top_splitter.setSizes([220, 480, 280])
+		# 检查器 - 替换 inspector 占位
+		ui.verticalLayout_3.replaceWidget(ui.inspector, self._inspector)
+		ui.inspector.hide()
+		ui.inspector.deleteLater()
 
-		main_splitter.addWidget(top_splitter)
+		# 传输栏 - 创建控制器，绑定 .ui 预设控件
+		self._transport_bar = TransportBar(
+			self._playback,
+			btn_play=ui.timeline_play_pause,
+			btn_stop=ui.timeline_stop,
+			btn_replay=ui.timeline_replay,
+			btn_hint_tick=ui.timeline_toggle_hint_tick,
+			btn_time_tick=ui.timeline_toggle_time_tick,
+			label_time=ui.timeline_time,
+			label_tick=ui.timeline_tick,
+			slider_volume=ui.timeline_volume_adjust,
+			label_music=ui.timeline_music_name,
+			label_bpm=ui.timeline_bpm,
+			btn_metronome=ui.timeline_metronome_toggle if self._test_mode else None,
+		)
 
-		# 下部: 传输条 + 时间线
-		self._bottom_panel = QWidget()
-		bottom_layout = QVBoxLayout(self._bottom_panel)
-		bottom_layout.setContentsMargins(0, 0, 0, 0)
-		bottom_layout.setSpacing(0)
+		# 时间线 - 设入 timeline_area
+		ui.timeline_area.setWidget(self._timeline)
 
-		bottom_layout.addWidget(self._transport_bar)
+		# 面板可见性引用
+		self._left_panel = ui.element_list_frame
+		self._right_panel = ui.inspector_frame
+		self._bottom_panel = ui.lower_frame
 
-		scroll = QScrollArea()
-		scroll.setWidgetResizable(True)
-		scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-		scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-		scroll.setWidget(self._timeline)
-		bottom_layout.addWidget(scroll, stretch=1)
-
-		main_splitter.addWidget(self._bottom_panel)
-		main_splitter.setSizes([450, 250])
-
-	# Statusbar & Shortcuts
-
-	def _setup_statusbar(self) -> None:
+		# 状态栏
 		self._status_label = QLabel("就绪")
-		self.statusBar().addWidget(self._status_label)
-		self.statusBar().showMessage("就绪", 5000)
+		ui.statusbar.addWidget(self._status_label)
 
-	def _setup_shortcuts(self) -> None:
-		space_action = QAction(self)
-		space_action.setShortcut(QKeySequence("Space"))
-		space_action.triggered.connect(self._playback.toggle_play_pause)
-		self.addAction(space_action)
+	# Menu Actions
+
+	def _connect_menu_actions(self) -> None:
+		"""绑定 Designer 预定义的 QAction 到槽函数."""
+		ui = self._ui
+
+		# 文件
+		ui.new_proj_action.triggered.connect(self._on_new_project)
+		ui.open_proj_action.triggered.connect(self._on_open_project)
+		ui.save_action.triggered.connect(self._on_save_project)
+		ui.save_as_action.triggered.connect(self._on_save_as_project)
+		ui.import_music_action.triggered.connect(self._on_import_music)
+		ui.import_point_action.triggered.connect(self._pos_selector.import_data)
+		ui.export_datapack_action.triggered.connect(self._on_export_datapack)
+		ui.export_point_action.triggered.connect(self._pos_selector.export_data)
+
+		# 编辑 - 新建元素 (按后端)
+		self._connect_new_element_actions()
+		ui.undo_action.triggered.connect(self._undo_manager.undo)
+		ui.redo_action.triggered.connect(self._undo_manager.redo)
+		self._undo_manager.can_undo_changed.connect(ui.undo_action.setEnabled)
+		self._undo_manager.can_redo_changed.connect(ui.redo_action.setEnabled)
+		self._undo_manager.undo_text_changed.connect(
+			lambda t: ui.undo_action.setText(f"撤销 {t}" if t else "撤销"))
+		self._undo_manager.redo_text_changed.connect(
+			lambda t: ui.redo_action.setText(f"重做 {t}" if t else "重做"))
+		ui.copy_element_action.triggered.connect(self._on_clone_element)
+		ui.delete_element_action.triggered.connect(self._on_delete_selected)
+		ui.play_action.triggered.connect(self._playback.play)
+		ui.pause_action.triggered.connect(self._playback.pause)
+		ui.stop_action.triggered.connect(self._playback.stop)
+		ui.backward_action.triggered.connect(lambda: self._playback.seek_to_tick(0))
+		self._playback.state_changed.connect(self._on_playback_state_for_actions)
+		# 刻度线菜单 <-> 传输栏按钮 双向同步
+		ui.hint_tick_toggle_action.toggled.connect(
+			ui.timeline_toggle_hint_tick.setChecked)
+		ui.time_tick_toggle_action.toggled.connect(
+			ui.timeline_toggle_time_tick.setChecked)
+
+		# 视图
+		ui.pos_selector_action.triggered.connect(self._pos_selector.showNormal)
+		self._setup_test_features()
+		# 面板可见性 action 已在 .ui 中预连接到对应 frame
+
+		# 项目
+		ui.proj_settings_action.triggered.connect(self._on_project_settings)
+
+		# 关于
+		ui.about_DynFirework_action.triggered.connect(
+			lambda: DYNAboutWindow().exec())
+		ui.help_action.triggered.connect(
+			self._help_window.show)
+
+	def _connect_new_element_actions(self) -> None:
+		"""根据后端连接新建元素的菜单 action."""
+		ui = self._ui
+		if self._backend == Backend.CB:
+			ui.new_firework_action.triggered.connect(
+				lambda: self._on_new_element(CbElementType.FIREWORK))
+			ui.new_traj_action.triggered.connect(
+				lambda: self._on_new_element(CbElementType.TRAJECTORY))
+			ui.new_tf_action.triggered.connect(
+				lambda: self._on_new_element(CbElementType.TRAJ_FIREWORK))
+		else:
+			ui.new_explosion_action.triggered.connect(
+				lambda: self._on_new_element(ElementCategory.FIREWORK))
+			ui.new_traj_action.triggered.connect(
+				lambda: self._on_new_element(ElementCategory.TRAJECTORY))
+			ui.new_effect_action.triggered.connect(
+				lambda: self._on_new_element(ElementCategory.EFFECT))
+			ui.new_complex_elem_action.triggered.connect(
+				lambda: self._on_new_element(ElementCategory.COMPOSITE))
+
+	def _update_media_actions(self) -> None:
+		"""根据媒体加载状态和播放状态更新播放相关 action."""
+		ui = self._ui
+		has_media = self._playback.player.mediaStatus() != QMediaPlayer.MediaStatus.NoMedia
+		state = self._playback.player.playbackState()
+		is_playing = state == QMediaPlayer.PlaybackState.PlayingState
+		ui.play_action.setEnabled(has_media and not is_playing)
+		ui.pause_action.setEnabled(has_media and is_playing)
+		ui.stop_action.setEnabled(has_media and state != QMediaPlayer.PlaybackState.StoppedState)
+		ui.backward_action.setEnabled(has_media)
+
+	def _on_playback_state_for_actions(self, state: str) -> None:
+		"""播放状态改变时更新菜单 action 的启用状态."""
+		self._update_media_actions()
+
+	def _set_metronome_enabled(self, enabled: bool) -> None:
+		"""同步菜单 action、传输栏按钮和 Metronome 的启用状态."""
+		if self._metronome is None:
+			return
+		self._metronome.enabled = enabled
+		if self._ui is not None:
+			self._ui.metronome_action_toggle.setChecked(enabled)
+			self._ui.timeline_metronome_toggle.setChecked(enabled)
+
+	def _on_metronome_state_changed(self, state: str) -> None:
+		if self._metronome is not None:
+			self._metronome.notify_state(state)
+
+	def _sync_metronome_settings(self) -> None:
+		"""从当前项目同步节拍器参数."""
+		if self._metronome is None:
+			return
+		proj = self._project_manager.project
+		self._metronome.set_bpm(proj.bpm)
+		self._metronome.set_time_signature(proj.time_signature)
+		self._metronome.set_audio_offset_ms(proj.audio_offset_ms)
+
+	def _setup_test_features(self) -> None:
+		"""集中管理测试功能：根据 _test_mode 切换 enable/disable 状态."""
+		ui = self._ui
+		test_actions = [
+			ui.metronome_action_toggle,
+			ui.palette_action,
+			ui.pos_selector_3d_action,
+		]
+		for action in test_actions:
+			action.setEnabled(self._test_mode)
+		ui.timeline_metronome_toggle.setEnabled(self._test_mode)
+		if self._test_mode:
+			try:
+				ui.metronome_action_toggle.toggled.disconnect(self._set_metronome_enabled)
+			except (RuntimeError, TypeError):
+				pass
+			ui.metronome_action_toggle.toggled.connect(self._set_metronome_enabled)
 
 	# Shared Signals
 
@@ -484,6 +462,7 @@ class MainWin(QMainWindow):
 		)
 
 		# 时间线信号 (按后端连接不同的 handler)
+		self._timeline.delete_requested.connect(self._on_delete_selected)
 		if self._backend == Backend.CB:
 			self._connect_cb_timeline_signals()
 		else:
@@ -497,18 +476,15 @@ class MainWin(QMainWindow):
 			self._playback.position_changed.connect(self._on_playback_position_df)
 			self._timeline.playback_cursor_changed.connect(self._on_timeline_cursor_df)
 
-		# 传输栏位置/状态更新 (_deactivate_current_backend 无参 disconnect 清除全部，需重连)
-		try:
-			self._playback.position_changed.disconnect(self._transport_bar._on_position_changed)
-			self._playback.state_changed.disconnect(self._transport_bar._on_state_changed)
-		except (TypeError, RuntimeError):
-			pass
-		self._playback.position_changed.connect(self._transport_bar._on_position_changed)
-		self._playback.state_changed.connect(self._transport_bar._on_state_changed)
-
-		# 辅助线/刻度线切换
+		# TransportBar 在 _inject_components 创建时已自连接 position_changed/state_changed
+		# 辅助线/刻度线切换 (每次切换后端需重连)
 		self._transport_bar.beat_lines_toggled.connect(self._timeline.set_show_beat_lines)
 		self._transport_bar.time_marks_toggled.connect(self._timeline.set_show_time_marks)
+		if self._metronome is not None:
+			self._transport_bar.metronome_toggled.connect(self._set_metronome_enabled)
+			self._playback.position_changed.connect(self._metronome.on_tick)
+			self._playback.state_changed.connect(self._on_metronome_state_changed)
+			self._sync_metronome_settings()
 
 	def _connect_cb_timeline_signals(self) -> None:
 		tracks = [self._timeline.fw_track, self._timeline.traj_track]
@@ -543,9 +519,8 @@ class MainWin(QMainWindow):
 			if reply == QMessageBox.No:
 				return
 
-		dlg = ProjectCreationDialog(self)
+		dlg = NewProjectDialog(self)
 		if dlg.exec() != QDialog.DialogCode.Accepted:
-			log.debug("用户取消新建项目")
 			return
 
 		proj = self._project_manager.new_project(
@@ -553,15 +528,20 @@ class MainWin(QMainWindow):
 			backend=dlg.backend,
 			mc_version=dlg.mc_version,
 			bpm=dlg.bpm,
+			time_signature=dlg.time_signature,
+			audio_offset_ms=dlg.audio_offset_ms,
 		)
 		self._activate_backend(proj.backend)
 		self._controller.load_from_project(proj)
-		self._element_browser_model.load_elements([])
+		self._element_browser_model.load_elements(self._controller.all_elements)
+		self._timeline.on_elements_changed()
 		self._inspector.clear()
 		self._playback.stop()
 		self._transport_bar.set_bpm(proj.bpm)
 		self._timeline.update_music_info(proj.bpm, proj.audio_offset_ms, proj.time_signature, proj.ticks_per_beat)
+		self._sync_metronome_settings()
 		log.debug(f"新建项目: name={proj.name}, backend={proj.backend.value}, bpm={proj.bpm}, mc={proj.mc_version}")
+		self._ui.label.setText(f"{proj.name} - {proj.mc_version}")
 		self.setWindowTitle(f"DynFirework   {proj.name}")
 		self.statusBar().showMessage(f"已创建: {proj.name} | BPM: {proj.bpm:.0f} | MC {proj.mc_version}")
 
@@ -596,10 +576,13 @@ class MainWin(QMainWindow):
 					self._playback.set_bpm(proj.bpm)
 					self._load_waveform(music_path)
 					self._transport_bar.set_music_path(proj.music_original_name)
+					self._update_media_actions()
 			self._timeline.on_elements_changed()
 			self._tree_view.expandAll()
 			self._transport_bar.set_bpm(proj.bpm)
 			self._timeline.update_music_info(proj.bpm, proj.audio_offset_ms, proj.time_signature, proj.ticks_per_beat)
+			self._sync_metronome_settings()
+			self._ui.label.setText(f"{proj.name} - {proj.mc_version}")
 			self.setWindowTitle(f"DynFirework   {proj.name}")
 			self.statusBar().showMessage(f"已打开: {path}")
 		except Exception as e:
@@ -679,6 +662,7 @@ class MainWin(QMainWindow):
 		self._playback.load_music(path)
 		self._load_waveform(path)
 		self._transport_bar.set_music_path(Path(path).name)
+		self._update_media_actions()
 		self.statusBar().showMessage(f"已导入: {Path(path).name}")
 
 	def _load_waveform(self, path: str) -> None:
@@ -696,12 +680,11 @@ class MainWin(QMainWindow):
 			return
 
 		proj = self._project_manager.project
-		dlg = ExportDialog(proj.name, proj.mc_version, self)
+		dlg = ExportDatapackDialog(proj.name, proj.mc_version, self)
 		if dlg.exec() != QDialog.DialogCode.Accepted:
-			log.debug("用户取消导出")
 			return
 
-		ns = dlg.namespace
+		ns = dlg.namespace or "fireworks1"
 		if not re.match(r'^[a-z0-9_\.]+$', ns):
 			QMessageBox.warning(self, "无效命名空间", "命名空间仅限小写字母、数字、下划线和点。")
 			log.warning(f"无效命名空间: {ns}")
@@ -801,11 +784,6 @@ class MainWin(QMainWindow):
 			elif isinstance(elem, CompositeElement):
 				for t in self._get_df_tracks():
 					t.set_selection(elem.id)
-			elif hasattr(elem, 'traj_type') and hasattr(elem, 'fw_type'):
-				for t in self._get_df_tracks():
-					t.set_selection("")
-				self._timeline.fw_track.set_selection(elem.id + "::fw")
-				self._timeline.traj_track.set_selection(elem.id)
 
 	def _on_tree_proxy_selected_cb(self, node: ProxyNode) -> None:
 		"""CB 后端: TF 代理节点选中处理."""
@@ -889,11 +867,16 @@ class MainWin(QMainWindow):
 				self._status_label.setText(f"已选中: {elem.name} (tick={elem.start_tick})")
 			else:
 				self._status_label.setText(f"已选中: {elem.name} ({elem.start_time:.2f}s)")
+			self._ui.inspector_target.setText(elem.name)
 		else:
 			self._status_label.setText("未选中")
+			self._ui.inspector_target.setText("")
 
 	def _on_element_count_changed(self, *args) -> None:
 		count = len(self._controller.all_elements)
+		has_elements = count > 0
+		self._ui.copy_element_action.setEnabled(has_elements)
+		self._ui.delete_element_action.setEnabled(has_elements)
 		log.debug(f"元素数量变更: {count}")
 		self.statusBar().showMessage(f"共 {count} 个元素", 3000)
 
@@ -1083,8 +1066,10 @@ class MainWin(QMainWindow):
 			self._playback.set_bpm(proj.bpm)
 			self._transport_bar.set_bpm(proj.bpm)
 			self._timeline.update_music_info(proj.bpm, proj.audio_offset_ms, proj.time_signature, proj.ticks_per_beat)
+			self._sync_metronome_settings()
 			self._project_manager.mark_modified()
 			log.debug(f"项目设置更新: name={proj.name}, bpm={proj.bpm:.0f}, ts={proj.time_signature}, mc_version={proj.mc_version}")
+			self._ui.label.setText(f"{proj.name} - {proj.mc_version}")
 			self.setWindowTitle(f"DynFirework   {proj.name}")
 			self.statusBar().showMessage(f"BPM: {proj.bpm:.0f} | {proj.time_signature[0]}/{proj.time_signature[1]} | MC {proj.mc_version} | {proj.name}")
 
@@ -1131,9 +1116,16 @@ def main():
 	log.debug("DynFirework 启动")
 	app = QApplication(sys.argv)
 	app.setApplicationName("DynFirework")
-	app.setOrganizationName("DynFirework")
+	app.setOrganizationName("SparkTeam")
+
+	# 加载资源字体
+	_font_to_load = (RESOURCE_DIR / "fonts").glob("*.ttf")
+	log.debug(f"加载字体: {list(_font_to_load)}")
+	for _tf in _font_to_load:
+		log.debug(f"加载：{_tf.name}" if QFontDatabase.addApplicationFont(str(_tf)) else f"加载失败：{_tf.name}")
+
 	win = MainWin()
-	win.show()
+	win.showMaximized()
 	sys.exit(app.exec())
 
 if __name__ == "__main__":

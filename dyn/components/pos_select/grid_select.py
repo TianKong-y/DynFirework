@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 	QApplication,
 )
 
-from dyn.ui.pos_select.create_new_point_ui import Ui_Dialog as NewPointDialogUI
+from dyn.ui.components.pos_selector.create_new_point import Ui_Dialog as NewPointDialogUI
 from dyn.lib.units import MinecraftPosition
 from dyn.components.pos_select.undo_commands import (
 	AddPointCommand,
@@ -71,7 +71,7 @@ class _BaseGraphWidget(QWidget):
 	def undo_stack(self) -> QUndoStack:
 		return self._undo_stack
 
-	# === 坐标转换 ===
+	# 坐标转换
 
 	def _grid_to_widget(self, gx: int, gz: int) -> tuple[float, float]:
 		x = self.center_x + gx * self.pix_size + self.offset_x
@@ -83,7 +83,7 @@ class _BaseGraphWidget(QWidget):
 		gz = int((wy - self.center_y - self.offset_y) // self.pix_size)
 		return gx, gz
 
-	# === 缩放 ===
+	# 缩放
 
 	def set_pix_size(self, size: int) -> None:
 		self.pix_size = max(3, min(50, size))
@@ -120,7 +120,7 @@ class _BaseGraphWidget(QWidget):
 
 		self.update()
 
-	# === 平移交互 ===
+	# 平移交互
 
 	def resizeEvent(self, a0: QResizeEvent) -> None:
 		self.center_x = self.rect().center().x()
@@ -164,7 +164,7 @@ class _BaseGraphWidget(QWidget):
 		if a0.button() == Qt.LeftButton:
 			self._handle_left_click(gx, gz)
 
-	# === CRUD 操作 ===
+	# CRUD 操作
 
 	def _handle_left_click(self, gx: int, gz: int) -> None:
 		log.debug(f"点击: grid=({gx}, {gz})")
@@ -223,7 +223,7 @@ class _BaseGraphWidget(QWidget):
 
 	def _edit_point(self, pt: MinecraftPosition) -> None:
 		log.debug(f"编辑位置点: ({pt.x}, {pt.y}, {pt.z}), label={pt.label}")
-		dlg = NewPointEditorDialog((int(pt.x), int(pt.z)))
+		dlg = NewPointEditorDialog((int(pt.x), int(pt.z)), edit_mode=True)
 		dlg.ui.doubleSpinBox_X.setValue(pt.x)
 		dlg.ui.doubleSpinBox_Z.setValue(pt.z)
 		dlg.ui.doubleSpinBox_Y.setValue(pt.y)
@@ -265,13 +265,13 @@ class _BaseGraphWidget(QWidget):
 		self.set_proper_pix_size()
 		self.update()
 
-	# === 选择同步 ===
+	# 选择同步
 
 	def get_list_selected_pix(self, selected_point: MinecraftPosition) -> None:
 		self.selected_point = selected_point
 		self.update()
 
-	# === 绘制模板 ===
+	# 绘制模板
 
 	def paintEvent(self, event) -> None:
 		p = QPainter(self)
@@ -329,7 +329,7 @@ class _BaseGraphWidget(QWidget):
 			p.setPen(QPen(QColor(60, 120, 220), 2))
 			p.drawRoundedRect(int(x), int(y), s, s, 3, 3)
 		except Exception:
-			pass
+			log.warning("绘制选中点失败", exc_info=True)
 
 # PixElementList 列表模型
 class PixElementList(QAbstractListModel):
@@ -474,9 +474,13 @@ class PixGraphWidget(_BaseGraphWidget):
 class NewPointEditorDialog(QDialog):
 	"""新建/编辑位置点对话框."""
 
-	def __init__(self, xz_pos: tuple) -> None:
+	def __init__(self, xz_pos: tuple, edit_mode: bool = False) -> None:
 		super().__init__()
-		self.ui = NewPointDialogUI()
+		if edit_mode:
+			from dyn.ui.components.pos_selector.edit_point import Ui_Dialog as EditPointUI
+			self.ui = EditPointUI()
+		else:
+			self.ui = NewPointDialogUI()
 		self.ui.setupUi(self)
 		self.xz_pos = xz_pos
 		self.set_default()
@@ -510,23 +514,30 @@ class NewPointEditorDialog(QDialog):
 		self.ui.spinBox_g.setValue(0)
 		self.ui.spinBox_b.setValue(0)
 
-	def set_red_value(self): self.ui.spinBox_r.setValue(255)
+	def set_red_value(self):
+		self.ui.spinBox_r.setValue(255)
 
-	def set_green_value(self): self.ui.spinBox_g.setValue(255)
+	def set_green_value(self):
+		self.ui.spinBox_g.setValue(255)
 
-	def set_blue_value(self): self.ui.spinBox_b.setValue(255)
-
-	@property
-	def y(self): return self.ui.doubleSpinBox_Y.value()
-
-	@property
-	def name(self): return self.ui.lineEdit_Name.text()
+	def set_blue_value(self):
+		self.ui.spinBox_b.setValue(255)
 
 	@property
-	def x(self): return self.ui.doubleSpinBox_X.value()
+	def y(self):
+		return self.ui.doubleSpinBox_Y.value()
 
 	@property
-	def z(self): return self.ui.doubleSpinBox_Z.value()
+	def name(self):
+		return self.ui.lineEdit_Name.text()
+
+	@property
+	def x(self):
+		return self.ui.doubleSpinBox_X.value()
+
+	@property
+	def z(self):
+		return self.ui.doubleSpinBox_Z.value()
 
 	@property
 	def color(self):

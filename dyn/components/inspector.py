@@ -4,14 +4,16 @@ from __future__ import annotations
 import json
 import logging
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QLabel
+from PySide6.QtGui import QFontDatabase
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit
 
 from dyn.models.df.base import Element as DfElement
 
 log = logging.getLogger("dyn.components.inspector")
 
 class Inspector(QWidget):
-	"""只读 JSON 检查器，显示选中元素的完整属性."""
+	"""只读 JSON 检查器，显示选中元素的完整属性.
+	标题行由 .ui 的 inspector_label + inspector_target 提供，此处仅含编辑器."""
 
 	def __init__(self, parent: QWidget | None = None) -> None:
 		super().__init__(parent)
@@ -19,16 +21,13 @@ class Inspector(QWidget):
 
 	def _setup_ui(self) -> None:
 		layout = QVBoxLayout(self)
-		layout.setContentsMargins(4, 4, 4, 4)
-		layout.setSpacing(4)
-
-		self._label = QLabel("检查器")
-		layout.addWidget(self._label)
+		layout.setContentsMargins(0, 0, 0, 0)
+		layout.setSpacing(0)
 
 		self._editor = QPlainTextEdit()
 		self._editor.setReadOnly(True)
 		self._editor.setPlaceholderText("未选中任何元素")
-		font = self._editor.font()
+		font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
 		font.setPointSize(11)
 		self._editor.setFont(font)
 		layout.addWidget(self._editor)
@@ -38,7 +37,6 @@ class Inspector(QWidget):
 			log.debug("检查器: 清空")
 			self._editor.setPlainText("")
 			self._editor.setPlaceholderText("未选中任何元素")
-			self._label.setText("检查器")
 			return
 
 		name = getattr(element, 'name', '?')
@@ -51,7 +49,6 @@ class Inspector(QWidget):
 		formatted = json.dumps(json_str, ensure_ascii=False, indent=2)
 		log.debug(f"  数据大小: {len(formatted)} 字符")
 		self._editor.setPlainText(formatted)
-		self._label.setText(f"检查器   {name}")
 
 	def refresh(self, element) -> None:
 		self.show_element(element)
